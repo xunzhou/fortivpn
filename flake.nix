@@ -13,11 +13,15 @@
         let pkgs = nixpkgs.legacyPackages.${system};
         in rec {
           fortivpn = pkgs.callPackage ./package.nix { };
+          i3-vpn-toggle = pkgs.callPackage ./i3-vpn-toggle.nix {
+            inherit fortivpn;
+          };
           default = fortivpn;
         });
 
       checks = forAllSystems (system: {
         fortivpn = self.packages.${system}.fortivpn;
+        i3-vpn-toggle = self.packages.${system}.i3-vpn-toggle;
       });
 
       devShells = forAllSystems (system:
