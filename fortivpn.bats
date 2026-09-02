@@ -1,0 +1,1 @@
+tests/fortivpn.bats

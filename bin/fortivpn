@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  printf 'usage: fortivpn [config|disconnect]\n' >&2
+  exit 2
+}
+
+disconnect() {
+  local pkill_executable
+
+  if (( $# != 0 )); then
+    usage
+  fi
+
+  require_command sudo
+  pkill_executable=$(resolve_executable pkill)
+  sudo "$pkill_executable" --signal INT --exact openfortivpn
+}
+
+require_command() {
+  local name=$1
+  if ! command -v "$name" >/dev/null 2>&1; then
+    printf 'required command not found on PATH: %s\n' "$name" >&2
+    return 1
+  fi
+}
+
+resolve_executable() {
+  local name=$1 candidate directory basename
+
+  if ! candidate=$(type -P -- "$name") || [[ ! -f $candidate || ! -x $candidate ]]; then
+    printf 'required command not found on PATH: %s\n' "$name" >&2
+    return 1
+  fi
+
+  directory=${candidate%/*}
+  basename=${candidate##*/}
+  if [[ $directory == "$candidate" ]]; then
+    directory=.
+  elif [[ -z $directory ]]; then
+    directory=/
+  fi
+  if ! directory=$(CDPATH='' cd -P -- "$directory" && pwd -P); then
+    printf 'could not resolve command on PATH: %s\n' "$name" >&2
+    return 1
+  fi
+  printf '%s/%s\n' "$directory" "$basename"
+}
+
+valid_host() {
+  local LC_ALL=C
+  [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]
+}
+
+valid_port() {
+  local LC_ALL=C
+  [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+}
+
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/openfortivpn"
+config="$config_dir/config"
+connection_snapshot_dir=''
+
+cleanup_connection_snapshot() {
+  if [[ -n $connection_snapshot_dir ]]; then
+    rm -rf -- "$connection_snapshot_dir"
+    connection_snapshot_dir=''
+  fi
+}
+
+configure() {
+  local host port answer temporary
+
+  if (( $# != 0 )); then
+    printf 'usage: fortivpn config\n' >&2
+    return 2
+  fi
+
+  for name in install mktemp chmod mv rm; do
+    require_command "$name"
+  done
+
+  read -r -p 'FortiVPN host: ' host
+  if ! valid_host "$host"; then
+    printf 'invalid host: use a DNS name or IPv4 address\n' >&2
+    return 1
+  fi
+
+  read -r -p 'FortiVPN port [443]: ' port
+  port=${port:-443}
+  if ! valid_port "$port"; then
+    printf 'invalid port: expected an integer from 1 through 65535\n' >&2
+    return 1
+  fi
+
+  if [[ -e $config || -L $config ]]; then
+    read -r -p "Replace existing $config? [y/N] " answer
+    if [[ $answer != y && $answer != Y ]]; then
+      printf 'configuration unchanged\n'
+      return 1
+    fi
+  fi
+
+  install -d -m 0700 -- "$config_dir"
+  temporary=$(mktemp "$config_dir/.config.XXXXXX")
+  trap 'rm -f -- "$temporary"' EXIT
+  printf 'host = %s\nport = %s\n' "$host" "$port" >"$temporary"
+  chmod 0600 -- "$temporary"
+  if [[ -L $config && -d $config ]]; then
+    rm -f -- "$config"
+  fi
+  mv -fT -- "$temporary" "$config"
+  trap - EXIT
+  printf 'created %s with mode 0600\n' "$config"
+}
+
+load_config() {
+  local config_snapshot=$1 key value
+  host=''
+  port=''
+
+  while IFS='=' read -r key value || [[ -n $key ]]; do
+    key=${key#"${key%%[![:space:]]*}"}
+    key=${key%"${key##*[![:space:]]}"}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    case $key in
+      host) host=$value ;;
+      port) port=$value ;;
+    esac
+  done <"$config_snapshot"
+
+  if ! valid_host "$host" || ! valid_port "$port"; then
+    printf 'config must contain a valid host and port: %s\n' "$config" >&2
+    return 1
+  fi
+}
+
+connect() {
+  local owner mode name gateway config_snapshot openfortivpn_executable
+
+  if (( $# != 0 )); then
+    usage
+  fi
+
+  if [[ ! -f $config || -L $config ]]; then
+    printf 'missing regular, non-symlink config: %s\n' "$config" >&2
+    printf 'create it with: fortivpn config\n' >&2
+    return 1
+  fi
+
+  for name in stat sudo openfortivpn-webview install mktemp chmod rm; do
+    require_command "$name"
+  done
+  openfortivpn_executable=$(resolve_executable openfortivpn)
+
+  owner=$(stat -c '%u' -- "$config")
+  mode=$(stat -c '%a' -- "$config")
+  if [[ $owner != "$UID" ]]; then
+    printf 'config must be owned by uid %s: %s\n' "$UID" "$config" >&2
+    return 1
+  fi
+  if (( (8#$mode & 8#077) != 0 )); then
+    printf 'config must not be accessible by group or others (run chmod 600): %s\n' "$config" >&2
+    return 1
+  fi
+
+  connection_snapshot_dir=$(mktemp -d -- "${TMPDIR:-/tmp}/fortivpn.XXXXXXXX")
+  trap cleanup_connection_snapshot EXIT
+  chmod 0700 -- "$connection_snapshot_dir"
+  config_snapshot="$connection_snapshot_dir/config"
+  install -m 0600 -- "$config" "$config_snapshot"
+
+  load_config "$config_snapshot"
+  gateway="$host:$port"
+  printf 'Opening an isolated FortiVPN SAML web view for %s.\n' "$gateway"
+  printf 'The session cookie is piped directly to openfortivpn and is not stored.\n'
+  sudo -v
+  openfortivpn-webview "$gateway" \
+    | sudo "$openfortivpn_executable" \
+      --config "$config_snapshot" \
+      --cookie-on-stdin
+}
+
+if (( $# == 0 )); then
+  connect "$@"
+elif (( $# == 1 )) && [[ $1 == config ]]; then
+  shift
+  configure "$@"
+elif (( $# == 1 )) && [[ $1 == disconnect ]]; then
+  shift
+  disconnect "$@"
+else
+  usage
+fi

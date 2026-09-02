@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+forti_selector='[class="^forti$"]'
+fortivpn_executable=${FORTIVPN_EXECUTABLE:-fortivpn}
+lock_path="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/i3-vpn-toggle.lock"
+terminal_pid=''
+
+cleanup_terminal() {
+  if [[ -n $terminal_pid ]] && kill -0 "$terminal_pid" 2>/dev/null; then
+    kill "$terminal_pid" 2>/dev/null || true
+  fi
+}
+
+tree_has_forti_terminal() {
+  jq -e 'any(.. | objects; .window_properties?.class? == "forti")' >/dev/null
+}
+
+vpn_is_connected() {
+  local interface line link_output
+
+  if ! link_output=$(ip -o link show); then
+    return 2
+  fi
+  while IFS= read -r line; do
+    line=${line#*: }
+    interface=${line%%:*}
+    interface=${interface%@*}
+    if [[ $interface == ppp0 ]]; then
+      return 0
+    fi
+  done <<<"$link_output"
+  return 1
+}
+
+exec 9>"$lock_path"
+flock 9
+trap cleanup_terminal EXIT
+
+if vpn_is_connected; then
+  exec alacritty --class forti-disconnect -e "$fortivpn_executable" disconnect
+else
+  vpn_status=$?
+  if (( vpn_status != 1 )); then
+    exit "$vpn_status"
+  fi
+fi
+
+i3_tree=$(i3-msg -t get_tree)
+if tree_has_forti_terminal <<<"$i3_tree"; then
+  i3-msg "$forti_selector kill" >/dev/null
+else
+  jq_status=$?
+  if (( jq_status != 1 )); then
+    exit "$jq_status"
+  fi
+
+  (
+    exec 9>&-
+    exec alacritty --class forti -e "$fortivpn_executable"
+  ) &
+  terminal_pid=$!
+
+  while kill -0 "$terminal_pid" 2>/dev/null; do
+    i3_tree=$(i3-msg -t get_tree)
+    if tree_has_forti_terminal <<<"$i3_tree"; then
+      terminal_pid=''
+      exit 0
+    else
+      jq_status=$?
+      if (( jq_status != 1 )); then
+        exit "$jq_status"
+      fi
+    fi
+    sleep 0.05
+  done
+
+  wait "$terminal_pid"
+fi
