@@ -23,6 +23,12 @@ make_fake() {
   chmod 0755 "$FAKE_BIN/$name"
 }
 
+require_packaged_wrapper() {
+  if [[ -z ${VPN_TOGGLE_PUBLIC_UNDER_TEST:-} || -z ${FORTIVPN_EXPECTED_UNDER_TEST:-} ]]; then
+    skip "requires the packaged wrapper install check"
+  fi
+}
+
 @test "toggle starts fortivpn when no exact forti terminal exists" {
   printf '%s\n' '{"nodes":[{"window_properties":{"class":"openfortivpn-webview"}}]}' >"$I3_TREE_FILE"
 
@@ -99,4 +105,34 @@ make_fake() {
   wait "$second_pid"
 
   [ "$(<"$CALL_LOG")" = $'alacritty <--class> <forti> <-e> <fortivpn>\ni3-msg <[class="^forti$"] kill>' ]
+}
+
+@test "packaged wrapper pins the launcher and runtime commands ahead of ambient PATH" {
+  require_packaged_wrapper
+  local shadow_log="$TEST_ROOT/shadowed"
+  export SHADOW_LOG="$shadow_log"
+  make_fake flock 'printf "flock\n" >>"$SHADOW_LOG"; exit 89'
+
+  run env -u FORTIVPN_EXECUTABLE "$BASH" -x "$VPN_TOGGLE_PUBLIC_UNDER_TEST"
+
+  [[ "$output" == *"FORTIVPN_EXECUTABLE=$FORTIVPN_EXPECTED_UNDER_TEST"* ]]
+
+  run env -u FORTIVPN_EXECUTABLE \
+    PATH="$FAKE_BIN" \
+    XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+    "$VPN_TOGGLE_PUBLIC_UNDER_TEST"
+
+  [ "$status" -ne 89 ]
+  [ ! -e "$shadow_log" ]
+}
+
+@test "packaged runtime provides coreutils sleep" {
+  require_packaged_wrapper
+  local wrapper_text coreutils_bin
+  wrapper_text=$(<"$VPN_TOGGLE_PUBLIC_UNDER_TEST")
+  coreutils_bin=$(sed -n "s|.*'\(/nix/store/[^']*-coreutils-[^']*/bin\)'.*|\1|p" <<<"$wrapper_text" | head -n 1)
+
+  [ -n "$coreutils_bin" ]
+  run env PATH="$coreutils_bin" "$coreutils_bin/sleep" 0
+  [ "$status" -eq 0 ]
 }

@@ -5,6 +5,7 @@
   bats,
   bash,
   alacritty,
+  coreutils,
   fortivpn,
   i3,
   iproute2,
@@ -27,22 +28,37 @@ stdenvNoCC.mkDerivation {
     runHook preInstall
     install -Dm755 contrib/i3-vpn-toggle "$out/bin/i3-vpn-toggle"
     wrapProgram "$out/bin/i3-vpn-toggle" \
-      --suffix PATH : ${lib.makeBinPath [
+      --prefix PATH : ${lib.makeBinPath [
         alacritty
         bash
+        coreutils
         fortivpn
         i3
         iproute2
         jq
         util-linux
-      ]}
+      ]} \
+      --set-default FORTIVPN_EXECUTABLE ${fortivpn}/bin/fortivpn
     runHook postInstall
   '';
 
   doInstallCheck = true;
   installCheckPhase = ''
     runHook preInstallCheck
-    VPN_TOGGLE_UNDER_TEST="$out/bin/i3-vpn-toggle" bats tests/i3-vpn-toggle.bats
+    PATH=${lib.makeBinPath [
+      alacritty
+      bash
+      coreutils
+      fortivpn
+      i3
+      iproute2
+      jq
+      util-linux
+    ]}:$PATH \
+      VPN_TOGGLE_UNDER_TEST="$out/bin/.i3-vpn-toggle-wrapped" \
+      VPN_TOGGLE_PUBLIC_UNDER_TEST="$out/bin/i3-vpn-toggle" \
+      FORTIVPN_EXPECTED_UNDER_TEST="${fortivpn}/bin/fortivpn" \
+      bats tests/i3-vpn-toggle.bats
     runHook postInstallCheck
   '';
 
